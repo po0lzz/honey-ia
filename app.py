@@ -43,7 +43,7 @@ if not st.session_state.autenticado:
 try:
     API_KEY = st.secrets["GEMINI_API_KEY"]
 except Exception:
-    API_KEY = "AQ.Ab8RN6I5RFZh3UGj1T7ICYCK918a2qxB2u5P-8zaV6A3F2MMSA"
+    API_KEY = ""
 
 client = genai.Client(api_key=API_KEY)
 
