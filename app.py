@@ -3,12 +3,12 @@ import uuid
 import io
 import base64
 import re
+import time
 import unicodedata
 import urllib.parse
 import urllib.request
 from PIL import Image
 from google import genai
-from google.genai import types
 
 # 1. Configuración de pantalla
 st.set_page_config(
@@ -39,7 +39,7 @@ if not st.session_state.autenticado:
                 st.error("❌ PIN incorrecto. Acceso denegado.")
     st.stop()
 
-# 3. Autenticación con Google AI
+# 3. Autenticación con Google AI (Lee de Secrets de forma segura)
 try:
     API_KEY = st.secrets["GEMINI_API_KEY"]
 except Exception:
@@ -52,7 +52,7 @@ SYSTEM_PROMPT = """
 Eres honey.ia, una asistente virtual rápida, directa, inteligente y pedagógica.
 
 REGLAS DE VELOCIDAD Y ESTILO:
-1. En saludos, charlas cotidianas o preguntas simples ("hola", "cómo estás", "cuánto es 2+2"): responde en 1 o 2 renglones máximo, fresca, natural y de forma inmediata.
+1. En saludos, charlas cotidianas o preguntas simples ("hola", "cómo te llamas", "qué puedes hacer"): responde en 2 renglones máximo, fresca, natural y al grano.
 2. En problemas de física o matemáticas: Sé directa y didáctica. Muestra las fórmulas en LaTeX ($...$ o $$...$$), datos, desarrollo paso a paso y el resultado final destacado.
 3. Si el usuario sube un archivo o imagen: analiza detalladamente lo solicitado con precisión.
 """
@@ -113,38 +113,27 @@ def compress_image_fast(raw_bytes):
     except Exception:
         return raw_bytes, "image/jpeg"
 
-def stream_ultra_rapido(client, contents_to_send, media_items_interactions):
-    """Prueba primero el streaming nativo de alta velocidad chunk por chunk"""
-    # 1. Intento por streaming directo (empieza a escribir en menos de 1 segundo)
+def consultar_modelo_directo(client, texto_usuario, media_items):
+    """Va directo a la API de Interacciones sin tiempo muerto ni reintentos fallidos"""
     try:
-        cfg = types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            temperature=0.3
-        )
-        stream = client.models.generate_content_stream(
-            model="gemini-3.8-flash",
-            contents=contents_to_send,
-            config=cfg
-        )
-        for chunk in stream:
-            if chunk.text:
-                yield chunk.text
-        return
-    except Exception:
-        pass
-
-    # 2. Respaldo por Interactions API
-    try:
-        payload = [{"type": "text", "text": SYSTEM_PROMPT + "\n\n" + str(contents_to_send[-1])}] + media_items_interactions
+        prompt_completo = f"{SYSTEM_PROMPT}\n\nConsulta del usuario: {texto_usuario}"
+        payload = [{"type": "text", "text": prompt_completo}] + media_items
+        
         interaction = client.interactions.create(
             model="models/gemini-3.8-flash",
             input=payload,
-            generation_config={"temperature": 0.3}
+            generation_config={"temperature": 0.2}
         )
-        txt = getattr(interaction, "output_text", "") or getattr(interaction, "text", "") or str(interaction)
-        yield txt
+        return getattr(interaction, "output_text", "") or getattr(interaction, "text", "") or str(interaction)
     except Exception as e:
-        yield f"⚠️ Error: {e}"
+        return f"⚠️ Error al conectar con el modelo: {e}"
+
+def efecto_escritura(texto):
+    """Muestra el texto progresivamente para una lectura dinámica"""
+    palabras = texto.split(" ")
+    for p in palabras:
+        yield p + " "
+        time.sleep(0.015)
 
 # 5. Estado de sesión
 DEFAULT_WELCOME = "¡Hola! Soy **honey.ia** 🍯, tu asistente inteligente multitarea. ¿En qué te ayudo hoy?"
@@ -164,7 +153,7 @@ if st.session_state.current_chat_id not in st.session_state.chats:
 
 current_chat = st.session_state.chats[st.session_state.current_chat_id]
 
-# 6. Sidebar
+# 6. Barra lateral
 with st.sidebar:
     st.markdown("### 🍯 honey.ia")
     if st.button("✏️ Nuevo chat", use_container_width=True, type="primary"):
@@ -223,7 +212,7 @@ with st.sidebar:
                         st.session_state.current_chat_id = list(st.session_state.chats.keys())[0] if st.session_state.chats else "chat_1"
                     st.rerun()
 
-# 7. Encabezado
+# 7. Encabezado principal
 st.title(f"🍯 {current_chat['title']}")
 st.caption("honey.ia: Tu asistente inteligente multitarea de alta velocidad")
 st.markdown("---")
@@ -257,7 +246,6 @@ if user_input:
 
     saved_images = []
     saved_filenames = []
-    contents_to_send = []
     media_items_interactions = []
 
     if archivos:
@@ -267,18 +255,15 @@ if user_input:
             if m.startswith("image/"):
                 opt_b, opt_m = compress_image_fast(raw_b)
                 saved_images.append(opt_b)
-                contents_to_send.append(types.Part.from_bytes(data=opt_b, mime_type=opt_m))
                 media_items_interactions.append({"type": "image", "data": base64.b64encode(opt_b).decode("utf-8"), "mime_type": opt_m})
             else:
                 saved_filenames.append(f.name)
                 mime_final = "application/pdf" if f.name.lower().endswith(".pdf") else m
-                contents_to_send.append(types.Part.from_bytes(data=raw_b, mime_type=mime_final))
                 media_items_interactions.append({"type": "document", "data": base64.b64encode(raw_b).decode("utf-8"), "mime_type": mime_final})
 
     if audio_obj:
         aud_bytes = audio_obj.getvalue()
         aud_mime = getattr(audio_obj, "type", "audio/webm") or "audio/webm"
-        contents_to_send.append(types.Part.from_bytes(data=aud_bytes, mime_type=aud_mime))
         media_items_interactions.append({"type": "audio", "data": base64.b64encode(aud_bytes).decode("utf-8"), "mime_type": aud_mime})
 
     prompt_texto = texto.strip()
@@ -331,14 +316,14 @@ if user_input:
             if not prompt_texto:
                 prompt_texto = "Analiza el contenido adjunto y responde detalladamente con fórmulas en LaTeX."
 
-            contents_to_send.append(prompt_texto)
+            with st.spinner("honey.ia está respondiendo..."):
+                respuesta_texto = consultar_modelo_directo(client, prompt_texto, media_items_interactions)
             
-            # Streaming real token a token
-            respuesta_completa = st.write_stream(stream_ultra_rapido(client, contents_to_send, media_items_interactions))
+            respuesta_renderizada = st.write_stream(efecto_escritura(respuesta_texto))
             
             current_chat["messages"].append({
                 "role": "assistant",
-                "content": respuesta_completa,
+                "content": respuesta_renderizada,
                 "images": [],
                 "files": []
             })
